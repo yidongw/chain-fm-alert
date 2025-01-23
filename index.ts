@@ -4,7 +4,13 @@ import * as readline from 'readline';
 
 const CHECK_INTERVAL = 10000; // 10 seconds
 const BEEP = '\x07'; // Terminal bell character
-const NET_ADDRS_THRESHOLD = 8;
+const NET_ADDRS_THRESHOLD = 9;
+// Add at the top of the file with other constants
+const ACKNOWLEDGMENT_TIMEOUT = 60 * 60 * 1000; // 1 hour in milliseconds
+
+// Add before the monitorNetAddrs function
+const acknowledgedTickers = new Map<string, number>();
+
 
 async function waitForAcknowledgment() {
   const rl = readline.createInterface({
@@ -20,21 +26,21 @@ async function waitForAcknowledgment() {
   });
 }
 
-async function checkNetAddrs(page: Page): Promise<number> {
+async function checkNetAddrs(page: Page) {
   // Find the "Net Addrs." text element and navigate up to the table
   const netAddrsText = page.locator('p.chakra-text:text("Net Addrs.")').first();
 
   // Wait for 5 seconds
-  await new Promise(resolve => setTimeout(resolve, 5000));
+  await new Promise(resolve => setTimeout(resolve, 4000));
 
   // Wait for the button to be present (max 5 seconds)
   await page.waitForFunction(() => {
     const button = document.querySelector('button.chakra-button[aria-label="activity"]');
     return button !== null;
-  }, { timeout: 5000 });
+  }, { timeout: 2000 });
 
   // Use the table element directly to find the content row
-  const netAddrsValue = await netAddrsText.evaluate((el) => {
+  const result = await netAddrsText.evaluate((el, threshold) => {
 
     let tableElement = el;
     // Navigate up to table
@@ -44,34 +50,37 @@ async function checkNetAddrs(page: Page): Promise<number> {
 
     console.log(tableElement);
 
-    // Get the content row (second div)
-    const contentRow = tableElement.children[1];
+    return Array.from(tableElement.children)
+      .slice(1) // Skip the header row
+      .map(row => {
+        const columns = row.querySelector('div > div');
+        if (!columns) return null;
 
-    console.log(contentRow);
-
-    // Navigate to columns container
-    const columns = contentRow.querySelector('div > div');
-    console.log(columns);
-
-    // Get the fourth column, then find its button
-    const fourthColumn = columns?.children[3];
-    console.log("fourthColumn", fourthColumn);
-
-    // Wait for the button to appear (max 5 seconds)
-    const button = fourthColumn?.querySelector('button');
-    console.log("button", button);
-
-
-    return button?.textContent || '0';
-  });
+        const firstColumn = columns.children[0];
+        const fourthColumn = columns.children[3];
+        
+        const tickerElement = firstColumn?.querySelector('p.chakra-text');
+        const button = fourthColumn?.querySelector('button');
+        
+        const netAddrs = parseInt(button?.textContent || '0', 10);
+        const ticker = tickerElement?.textContent || 'Unknown';
+        
+        return { netAddrs, ticker };
+      })
+      .filter((item): item is { netAddrs: number; ticker: string } => {
+        return item !== null && item.netAddrs >= threshold;
+      });
+  }, NET_ADDRS_THRESHOLD);
   
-  return parseInt(netAddrsValue, 10);
+  return result;
 }
 
 
 async function closeDialog(page: Page) {
   try {
-    await page.click('button.chakra-modal__close-btn[aria-label="Close"]');
+    await page.click('button.chakra-modal__close-btn[aria-label="Close"]', {
+      timeout: 1000 // 1 second timeout
+    });
     return true;  // Dialog was found and closed
   } catch {
     return false;  // No dialog found or couldn't close
@@ -97,21 +106,32 @@ async function monitorNetAddrs() {
         await page.click('button:text("1h")');
       }
 
-      const netAddrs = await checkNetAddrs(page);
-      console.log(`Current Net Addrs: ${netAddrs}`);
+      const results = await checkNetAddrs(page);
+      
+      // Log all results
+      results.forEach(({ netAddrs, ticker }) => {
+        console.log(`Current Net Addrs: ${netAddrs} for ${ticker}`);
+      });
 
-      if (netAddrs >= NET_ADDRS_THRESHOLD) {
-        console.log(`Alert: Net Addrs is ${NET_ADDRS_THRESHOLD} or higher!`);
-        // Beep until acknowledged
-        const beepInterval = setInterval(() => process.stdout.write(BEEP), 1000);
-        await waitForAcknowledgment();
-        clearInterval(beepInterval);
+      // Check each result for alerts
+      for (const { netAddrs, ticker } of results) {
+        const lastAcknowledged = acknowledgedTickers.get(ticker);
+        const currentTime = Date.now();
+        
+        if (!lastAcknowledged || currentTime - lastAcknowledged > ACKNOWLEDGMENT_TIMEOUT) {
+          console.log(`Alert: ${ticker} has Net Addrs of ${netAddrs} (threshold: ${NET_ADDRS_THRESHOLD})!`);
+          // Beep until acknowledged
+          const beepInterval = setInterval(() => process.stdout.write(BEEP), 1000);
+          await waitForAcknowledgment();
+          
+          clearInterval(beepInterval);
+          // Store the acknowledgment time
+          acknowledgedTickers.set(ticker, currentTime);
+        }
       }
 
       await new Promise(resolve => setTimeout(resolve, CHECK_INTERVAL));
-
       isFirstClick = !isFirstClick;  // Toggle for next iteration
-
     }
   } catch (error) {
     console.error('An error occurred:', error);
