@@ -4,9 +4,11 @@ import * as readline from 'readline';
 
 const CHECK_INTERVAL = 10000; // 10 seconds
 const BEEP = '\x07'; // Terminal bell character
-const NET_ADDRS_THRESHOLD = 9;
+const NET_ADDRS_THRESHOLD_FOR_5M = 9;
+const NET_ADDRS_THRESHOLD_FOR_1H = 15;
+
 // Add at the top of the file with other constants
-const ACKNOWLEDGMENT_TIMEOUT = 60 * 60 * 1000; // 1 hour in milliseconds
+const ACKNOWLEDGMENT_TIMEOUT = 3 * 60 * 60 * 1000; // 3 hours in milliseconds
 
 // Add before the monitorNetAddrs function
 const acknowledgedTickers = new Map<string, number>();
@@ -26,7 +28,7 @@ async function waitForAcknowledgment() {
   });
 }
 
-async function checkNetAddrs(page: Page) {
+async function checkNetAddrs(page: Page, thresholdNumber: number) {
   // Find the "Net Addrs." text element and navigate up to the table
   const netAddrsText = page.locator('p.chakra-text:text("Net Addrs.")').first();
 
@@ -70,7 +72,7 @@ async function checkNetAddrs(page: Page) {
       .filter((item): item is { netAddrs: number; ticker: string } => {
         return item !== null && item.netAddrs >= threshold;
       });
-  }, NET_ADDRS_THRESHOLD);
+  }, thresholdNumber);
   
   return result;
 }
@@ -99,18 +101,44 @@ async function monitorNetAddrs() {
     while (true) {
       await closeDialog(page);
 
-      // Alternate between 5m and 1h buttons
-      if (isFirstClick) {
-        await page.click('button:text("5m")');
-      } else {
-        await page.click('button:text("1h")');
+
+      // Wait for and click the time interval button
+      async function waitForTimeButton(timeText: string) {
+        while (true) {
+          try {
+            // Wait for 5 seconds max for the button to appear
+            await page.waitForSelector(`button:text("${timeText}")`, { timeout: 5000 });
+            await page.click(`button:text("${timeText}")`);
+            return true;
+          } catch {
+            console.log(`Button "${timeText}" not found, refreshing page...`);
+            await page.reload();
+            // Wait a bit after refresh
+            await new Promise(resolve => setTimeout(resolve, 2000));
+          }
+        }
       }
 
-      const results = await checkNetAddrs(page);
+      // Alternate between 5m and 1h buttons
+      const NET_ADDRS_THRESHOLD = isFirstClick ? NET_ADDRS_THRESHOLD_FOR_5M : NET_ADDRS_THRESHOLD_FOR_1H;
+      if (isFirstClick) {
+        await waitForTimeButton("5m");
+      } else {
+        await waitForTimeButton("1h");
+      }
+
+      const results = await checkNetAddrs(
+        page,
+        NET_ADDRS_THRESHOLD
+      );
       
+      const currentTime = new Date().toLocaleTimeString();
+
+      console.log(`[${currentTime}] Found ${results.length} tickers with Net Addrs >= ${NET_ADDRS_THRESHOLD}`);
+
       // Log all results
       results.forEach(({ netAddrs, ticker }) => {
-        console.log(`Current Net Addrs: ${netAddrs} for ${ticker}`);
+        console.log(`[${currentTime}] Current Net Addrs: ${netAddrs} for ${ticker}`);
       });
 
       // Check each result for alerts
